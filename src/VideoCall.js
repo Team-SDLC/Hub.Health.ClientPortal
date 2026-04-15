@@ -8,7 +8,7 @@ import { AzureCommunicationTokenCredential } from "@azure/communication-common";
 const BACKEND_TOKEN_URL = "http://localhost:3001/api/token";
 
 const TEAMS_MEETING_LINK =
-  "https://teams.microsoft.com/l/meetup-join/19%3ameeting_MjBiNjMyN2EtZGJhMC00MzA0LWI2MjEtZWJhOTA2NWM2NWU4%40thread.v2/0?context=%7b%22Tid%22%3a%22dc0b52a3-68c5-44f7-881d-9383d8850b96%22%2c%22Oid%22%3a%22c93f4ad1-6486-487a-9800-d42f3dd9c8ec%22%7d";
+  "https://teams.microsoft.com/meet/46235146178531?p=UavJ0b5R5f8k94QL1i";
 
 let callClient = null;
 let callAgent = null;
@@ -18,8 +18,10 @@ let activeCall = null;
 let localVideoStream = null;
 let localVideoRenderer = null;
 let localVideoView = null;
+let isLocalVideoStarted = false;
 
 const remoteStreamRenderers = new Map();
+const remoteParticipantListeners = new Map();
 
 function validateMeetingLink(link) {
   if (!link || typeof link !== "string") {
@@ -28,12 +30,15 @@ function validateMeetingLink(link) {
 
   const lower = link.toLowerCase();
 
-  if (!lower.includes("teams.microsoft.com/l/meetup-join/")) {
-    throw new Error("Invalid Teams meeting link.");
-  }
-
   if (lower.includes("teams.live.com")) {
     throw new Error("Teams personal/life meetings are not supported.");
+  }
+
+  const isOldFormat = lower.includes("teams.microsoft.com/l/meetup-join/");
+  const isNewFormat = lower.includes("teams.microsoft.com/meet/");
+
+  if (!isOldFormat && !isNewFormat) {
+    throw new Error("Invalid Teams meeting link.");
   }
 }
 
@@ -49,7 +54,9 @@ async function getToken() {
   });
 
   if (!tokenResponse.ok) {
-    throw new Error(`Could not get ACS token from backend. HTTP ${tokenResponse.status}`);
+    throw new Error(
+      `Could not get ACS token from backend. HTTP ${tokenResponse.status}`
+    );
   }
 
   const tokenData = await tokenResponse.json();
@@ -68,10 +75,31 @@ async function ensureClient() {
 
   if (!deviceManager) {
     deviceManager = await callClient.getDeviceManager();
+
     try {
       await deviceManager.askDevicePermission({ audio: true, video: true });
     } catch (error) {
       console.warn("Device permission request failed:", error);
+    }
+
+    try {
+      const microphones = await deviceManager.getMicrophones();
+      const speakers = await deviceManager.getSpeakers();
+      const cameras = await deviceManager.getCameras();
+
+      console.log("Microphones:", microphones);
+      console.log("Speakers:", speakers);
+      console.log("Cameras:", cameras);
+
+      if (microphones.length > 0) {
+        await deviceManager.selectMicrophone(microphones[0]);
+      }
+
+      if (speakers.length > 0) {
+        await deviceManager.selectSpeaker(speakers[0]);
+      }
+    } catch (error) {
+      console.warn("Device enumeration/selection failed:", error);
     }
   }
 
@@ -115,6 +143,12 @@ async function renderLocalVideo(container) {
     localVideoView = await localVideoRenderer.createView();
   }
 
+  localVideoView.target.style.width = "100%";
+  localVideoView.target.style.height = "100%";
+  localVideoView.target.style.objectFit = "cover";
+  localVideoView.target.style.display = "block";
+  localVideoView.target.style.backgroundColor = "#000";
+
   container.innerHTML = "";
   container.appendChild(localVideoView.target);
 }
@@ -152,17 +186,26 @@ async function renderRemoteVideoStream(remoteVideoStream, remoteVideosContainer)
   const view = await renderer.createView();
 
   const wrapper = document.createElement("div");
-  wrapper.style.width = "320px";
-  wrapper.style.height = "240px";
+  wrapper.style.width = "100%";
+  wrapper.style.maxWidth = "980px";
+  wrapper.style.aspectRatio = "16 / 9";
   wrapper.style.background = "#000";
-  wrapper.style.borderRadius = "12px";
+  wrapper.style.borderRadius = "20px";
   wrapper.style.overflow = "hidden";
-  wrapper.style.border = "1px solid #ddd";
+  wrapper.style.border = "1px solid rgba(255,255,255,0.08)";
   wrapper.style.display = "flex";
   wrapper.style.alignItems = "center";
   wrapper.style.justifyContent = "center";
+  wrapper.style.boxShadow = "0 10px 30px rgba(0,0,0,0.18)";
+
+  view.target.style.width = "100%";
+  view.target.style.height = "100%";
+  view.target.style.objectFit = "cover";
+  view.target.style.display = "block";
 
   wrapper.appendChild(view.target);
+
+  remoteVideosContainer.innerHTML = "";
   remoteVideosContainer.appendChild(wrapper);
 
   remoteStreamRenderers.set(streamKey, {
@@ -175,7 +218,9 @@ async function renderRemoteVideoStream(remoteVideoStream, remoteVideosContainer)
 function disposeRemoteVideoStream(remoteVideoStream) {
   const streamKey = remoteVideoStream.id;
 
-  if (!remoteStreamRenderers.has(streamKey)) return;
+  if (!remoteStreamRenderers.has(streamKey)) {
+    return;
+  }
 
   const entry = remoteStreamRenderers.get(streamKey);
 
@@ -239,11 +284,20 @@ async function handleRemoteVideoStream(remoteVideoStream, remoteVideosContainer)
 }
 
 async function subscribeToParticipant(participant, remoteVideosContainer) {
-  participant.videoStreams.forEach(async (stream) => {
-    await handleRemoteVideoStream(stream, remoteVideosContainer);
-  });
+  console.log("Participant connected:", participant);
+  console.log("participant.isMuted:", participant.isMuted);
+  console.log("participant.state:", participant.state);
+  console.log("participant.displayName:", participant.displayName);
 
-  participant.on("videoStreamsUpdated", (e) => {
+  const onMutedChanged = () => {
+    console.log("Remote participant muted changed:", participant.isMuted);
+  };
+
+  const onStateChanged = () => {
+    console.log("Remote participant state changed:", participant.state);
+  };
+
+  const onVideoStreamsUpdated = (e) => {
     e.added.forEach(async (stream) => {
       await handleRemoteVideoStream(stream, remoteVideosContainer);
     });
@@ -251,7 +305,46 @@ async function subscribeToParticipant(participant, remoteVideosContainer) {
     e.removed.forEach((stream) => {
       disposeRemoteVideoStream(stream);
     });
+  };
+
+  participant.on("isMutedChanged", onMutedChanged);
+  participant.on("stateChanged", onStateChanged);
+  participant.on("videoStreamsUpdated", onVideoStreamsUpdated);
+
+  const participantKey =
+    participant.identifier?.rawId ||
+    participant.identifier?.communicationUserId ||
+    participant.identifier?.microsoftTeamsUserId ||
+    `${Date.now()}-${Math.random()}`;
+
+  remoteParticipantListeners.set(participantKey, {
+    participant,
+    onMutedChanged,
+    onStateChanged,
+    onVideoStreamsUpdated
   });
+
+  participant.videoStreams.forEach(async (stream) => {
+    await handleRemoteVideoStream(stream, remoteVideosContainer);
+  });
+}
+
+function clearParticipantListeners() {
+  for (const [, entry] of remoteParticipantListeners) {
+    try {
+      entry.participant.off("isMutedChanged", entry.onMutedChanged);
+    } catch {}
+
+    try {
+      entry.participant.off("stateChanged", entry.onStateChanged);
+    } catch {}
+
+    try {
+      entry.participant.off("videoStreamsUpdated", entry.onVideoStreamsUpdated);
+    } catch {}
+  }
+
+  remoteParticipantListeners.clear();
 }
 
 export async function joinCall({
@@ -278,15 +371,33 @@ export async function joinCall({
     }
   );
 
-  activeCall.on("stateChanged", () => {
+  activeCall.on("stateChanged", async () => {
     console.log("Call state:", activeCall.state);
+    console.log("Remote participants count:", activeCall.remoteParticipants.length);
+
+    if (
+      activeCall.state === "Connected" &&
+      localVideoContainer &&
+      !isLocalVideoStarted
+    ) {
+      try {
+        const stream = await createLocalVideoStreamIfNeeded();
+        await renderLocalVideo(localVideoContainer);
+        await activeCall.startVideo(stream);
+        isLocalVideoStarted = true;
+      } catch (error) {
+        console.error("Auto-start local video failed:", error);
+      }
+    }
+
     if (typeof onStateChanged === "function") {
       onStateChanged(activeCall.state, activeCall);
     }
   });
 
   activeCall.on("isMutedChanged", () => {
-    console.log("Muted:", activeCall.isMuted);
+    console.log("Local muted:", activeCall.isMuted);
+
     if (typeof onMutedChanged === "function") {
       onMutedChanged(activeCall.isMuted, activeCall);
     }
@@ -297,6 +408,10 @@ export async function joinCall({
 
     e.added.forEach(async (participant) => {
       await subscribeToParticipant(participant, remoteVideosContainer);
+    });
+
+    e.removed.forEach((participant) => {
+      console.log("Remote participant removed:", participant);
     });
 
     if (typeof onParticipantsChanged === "function") {
@@ -312,11 +427,13 @@ export async function joinCall({
     onStateChanged(activeCall.state, activeCall);
   }
 
+  if (typeof onMutedChanged === "function") {
+    onMutedChanged(activeCall.isMuted, activeCall);
+  }
+
   if (typeof onParticipantsChanged === "function") {
     onParticipantsChanged(activeCall.remoteParticipants, activeCall);
   }
-
-  console.log("Join started.");
 
   return activeCall;
 }
@@ -326,34 +443,107 @@ export async function startMyVideo(localVideoContainer) {
     throw new Error("No active call.");
   }
 
-  const stream = await createLocalVideoStreamIfNeeded();
-  await renderLocalVideo(localVideoContainer);
-  await activeCall.startVideo(stream);
-}
-
-export async function stopMyVideo() {
-  if (!activeCall || !localVideoStream) {
+  if (isLocalVideoStarted) {
     return;
   }
 
-  await activeCall.stopVideo(localVideoStream);
+  const stream = await createLocalVideoStreamIfNeeded();
+  await renderLocalVideo(localVideoContainer);
+  await activeCall.startVideo(stream);
+  isLocalVideoStarted = true;
+}
+
+export async function stopMyVideo() {
+  if (!activeCall || !localVideoStream || !isLocalVideoStarted) {
+    return;
+  }
+
+  try {
+    await activeCall.stopVideo(localVideoStream);
+  } catch (error) {
+    console.warn("stopMyVideo failed:", error);
+  }
+
   await disposeLocalPreview();
+  isLocalVideoStarted = false;
+}
+
+export async function muteMyAudio() {
+  if (!activeCall) {
+    throw new Error("No active call.");
+  }
+
+  if (!activeCall.isMuted) {
+    await activeCall.mute();
+  }
+}
+
+export async function unmuteMyAudio() {
+  if (!activeCall) {
+    throw new Error("No active call.");
+  }
+
+  if (activeCall.isMuted) {
+    await activeCall.unmute();
+  }
+}
+
+export function getCallState() {
+  return activeCall?.state ?? "Disconnected";
+}
+
+export function isMyAudioMuted() {
+  return activeCall?.isMuted ?? false;
+}
+
+export function isVideoStarted() {
+  return isLocalVideoStarted;
 }
 
 export async function leaveCall() {
-  if (!activeCall) return;
+  if (!activeCall) {
+    return;
+  }
+
+  const callToClose = activeCall;
+  activeCall = null;
 
   try {
-    if (localVideoStream) {
+    if (localVideoStream && isLocalVideoStarted) {
       try {
-        await activeCall.stopVideo(localVideoStream);
-      } catch {}
+        await callToClose.stopVideo(localVideoStream);
+      } catch (error) {
+        console.warn("stopVideo during leave failed:", error);
+      }
     }
 
-    await activeCall.hangUp();
+    try {
+      await callToClose.hangUp();
+    } catch (error) {
+      console.warn("hangUp failed:", error);
+    }
   } finally {
-    await disposeLocalPreview();
-    clearAllRemoteVideos();
-    activeCall = null;
+    try {
+      await disposeLocalPreview();
+    } catch (error) {
+      console.warn("disposeLocalPreview failed:", error);
+    }
+
+    try {
+      clearAllRemoteVideos();
+    } catch (error) {
+      console.warn("clearAllRemoteVideos failed:", error);
+    }
+
+    try {
+      clearParticipantListeners();
+    } catch (error) {
+      console.warn("clearParticipantListeners failed:", error);
+    }
+
+    localVideoStream = null;
+    localVideoRenderer = null;
+    localVideoView = null;
+    isLocalVideoStarted = false;
   }
 }
