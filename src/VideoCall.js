@@ -5,9 +5,11 @@ import {
 } from "@azure/communication-calling";
 import { AzureCommunicationTokenCredential } from "@azure/communication-common";
 
-const BACKEND_TOKEN_URL = "http://localhost:3001/api/token";
+const BACKEND_TOKEN_URL =
+  process.env.REACT_APP_BACKEND_TOKEN_URL || "http://localhost:3001/api/token";
 
 const TEAMS_MEETING_LINK =
+  process.env.REACT_APP_TEAMS_MEETING_LINK ||
   "https://teams.microsoft.com/meet/46235146178531?p=UavJ0b5R5f8k94QL1i";
 
 let callClient = null;
