@@ -6,7 +6,7 @@ import {
 import { AzureCommunicationTokenCredential } from "@azure/communication-common";
 
 const BACKEND_TOKEN_URL =
-  process.env.REACT_APP_BACKEND_TOKEN_URL || "http://localhost:3001/api/token";
+  process.env.REACT_APP_BACKEND_TOKEN_URL || "https://hub-health-portalbackend.onrender.com/api/token";
 
 const TEAMS_MEETING_LINK =
   process.env.REACT_APP_TEAMS_MEETING_LINK ||
